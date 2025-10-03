@@ -158,8 +158,10 @@ class ClassificationEngine:
         score = 0
         if rule.extensions and file_info.file_extension in rule.extensions:
             score += rule.priority
-        if rule.keywords and any(keyword in file_info.file_name for keyword in rule.keywords):
-            score += rule.priority + 5
+        if rule.keywords:
+            file_name = file_info.file_name.casefold()
+            if any(keyword.casefold() in file_name for keyword in rule.keywords):
+                score += rule.priority + 5
         if rule.min_size and file_info.file_size >= rule.min_size:
             score += max(5, rule.priority // 2)
         return score
