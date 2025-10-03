@@ -85,6 +85,33 @@ def test_classification_engine_scores_rules() -> None:
     assert score >= documents_rule.priority
 
 
+def test_classification_keywords_are_case_insensitive() -> None:
+    engine = ClassificationEngine()
+    keyword_rule = CategoryRule(
+        id="notes",
+        name="📝 筆記",
+        emoji="📝",
+        keywords=("notes",),
+        priority=15,
+    )
+    engine.rules[keyword_rule.id] = keyword_rule
+
+    file_info = FileInfo(
+        file_path=Path("dummy"),
+        file_name="Project_NOTES.txt",
+        file_extension=".txt",
+        file_size=512,
+        creation_date=None,
+        modification_date=None,
+        source_folder=Path("."),
+    )
+
+    category, score = engine.classify(file_info)
+
+    assert category == keyword_rule.name
+    assert score >= keyword_rule.priority
+
+
 def test_file_mover_duplicate_handling(tmp_path: Path) -> None:
     destination = tmp_path / "dest"
     destination.mkdir()
