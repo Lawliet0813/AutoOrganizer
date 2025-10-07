@@ -1,0 +1,7 @@
+[
+  {
+    "operation": "rename",
+    "from": "/Users/example/Archive/Documents/report.pdf",
+    "to": "/Users/example/Downloads/report.pdf"
+  }
+]
