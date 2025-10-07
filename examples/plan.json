@@ -1,0 +1,39 @@
+{
+  "generated_at": "2024-04-01T12:00:00Z",
+  "sources": ["/Users/example/Downloads"],
+  "destination_root": "/Users/example/Archive",
+  "summary": {
+    "total_candidates": 2,
+    "planned": 1,
+    "skipped": 1,
+    "total_bytes": 2048,
+    "categories": {
+      "documents": 1
+    }
+  },
+  "items": [
+    {
+      "source": "/Users/example/Downloads/report.pdf",
+      "destination": "/Users/example/Archive/Documents/report.pdf",
+      "operation": "rename",
+      "same_volume": true,
+      "size": 2048,
+      "conflict": false,
+      "estimated_ms": 10.5,
+      "hash_digest": null,
+      "category": "documents",
+      "confidence": 1.0,
+      "rationale": "extension:.pdf",
+      "flags": []
+    }
+  ],
+  "skipped": [
+    {
+      "path": "/Users/example/Downloads/.DS_Store",
+      "should_skip": true,
+      "reason": "system",
+      "flags": ["system"],
+      "size": 0
+    }
+  ]
+}

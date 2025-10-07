@@ -1,0 +1,24 @@
+AutoOrganizer Execution Report
+================================
+Report generated: 2024-04-01T12:05:00Z
+
+Plan Summary:
+  Sources       : /Users/example/Downloads
+  Destination   : /Users/example/Archive
+  Candidates    : 2
+  Planned       : 1
+  Skipped       : 1
+  Total bytes   : 2048
+  Categories    :
+    - documents: 1
+
+Skipped Items:
+  - /Users/example/Downloads/.DS_Store (system)
+
+Execution Summary:
+  Processed     : 1
+  Succeeded     : 1
+  Skipped       : 0
+  Failed        : 0
+  Bytes moved   : 2048
+
