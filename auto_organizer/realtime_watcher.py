@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Sequence
@@ -19,29 +18,10 @@ except Exception:  # pragma: no cover - optional dependency
     Stream = None  # type: ignore[assignment]
 
 from .logger import configure_logging, log_event
+from .watcher.event_queue import EventQueue
+from .watcher.types import EventType, FileSystemEvent
 
 LOGGER_NAME = "auto_organizer.realtime"
-
-
-class EventType(Enum):
-    """Known filesystem event types."""
-
-    CREATED = auto()
-    MODIFIED = auto()
-    DELETED = auto()
-    MOVED = auto()
-
-
-@dataclass(slots=True)
-class FileSystemEvent:
-    """Normalized filesystem event payload."""
-
-    path: Path
-    event_type: EventType
-    timestamp: float = field(default_factory=lambda: time.time())
-    is_directory: bool = False
-    dest_path: Path | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class _WatcherBackend:
@@ -128,6 +108,7 @@ class RealtimeWatcher:
         blacklist_patterns: Sequence[str] | None = None,
         backend_factory: Callable[["RealtimeWatcher"], _WatcherBackend | None] | None = None,
         logger: logging.Logger | None = None,
+        polling_interval: float = 2.0,
     ) -> None:
         if not paths:
             raise ValueError("At least one path must be provided for realtime watching")
@@ -143,6 +124,13 @@ class RealtimeWatcher:
         self._worker: threading.Thread | None = None
         self._backend: _WatcherBackend | None = None
         self._lock = threading.Lock()
+        self.polling_interval = polling_interval
+
+        self._event_queue = EventQueue(
+            self._emit,
+            debounce_interval=self.debounce_interval,
+            flush_interval=self.batch_interval,
+        )
 
         self.logger = logger or logging.getLogger(LOGGER_NAME)
         if not self.logger.handlers:
@@ -220,44 +208,23 @@ class RealtimeWatcher:
         self.publish(filesystem_event)
 
     def _run(self) -> None:
-        pending: dict[Path, FileSystemEvent] = {}
-        last_seen: dict[Path, float] = {}
-        last_flush = time.monotonic()
-
         while not self._stop_event.is_set():
             timeout = max(self.batch_interval / 5, 0.05)
             try:
                 item = self._queue.get(timeout=timeout)
             except Empty:
-                item = None
-
-            now = time.monotonic()
+                self._event_queue.flush_due()
+                continue
 
             if item is _Sentinel:
                 break
             if isinstance(item, FileSystemEvent):
                 if self._is_blacklisted(item.path):
                     continue
-                last_time = last_seen.get(item.path)
-                if last_time is not None and (now - last_time) <= self.debounce_interval:
-                    existing = pending[item.path]
-                    existing.event_type = self._coalesce(existing.event_type, item.event_type)
-                    existing.timestamp = item.timestamp
-                    existing.is_directory = item.is_directory
-                    existing.dest_path = item.dest_path or existing.dest_path
-                    existing.metadata.update(item.metadata)
-                else:
-                    pending[item.path] = item
-                last_seen[item.path] = now
+                self._event_queue.add(item)
+                self._event_queue.flush_due()
 
-            if pending and (now - last_flush) >= self.batch_interval:
-                self._emit(list(pending.values()))
-                pending.clear()
-                last_seen.clear()
-                last_flush = now
-
-        if pending:
-            self._emit(list(pending.values()))
+        self._event_queue.flush_due(force=True)
 
     def _emit(self, events: list[FileSystemEvent]) -> None:
         try:
@@ -280,23 +247,104 @@ class RealtimeWatcher:
         return False
 
     @staticmethod
-    def _coalesce(existing: EventType, new: EventType) -> EventType:
-        if new is EventType.DELETED:
-            return EventType.DELETED
-        if new is EventType.MOVED:
-            return EventType.MOVED
-        if existing is EventType.CREATED and new is EventType.MODIFIED:
-            return EventType.CREATED
-        return new
-
-    @staticmethod
     def _default_backend_factory(watcher: "RealtimeWatcher") -> _WatcherBackend | None:
         if sys.platform == "darwin" and Observer is not None and Stream is not None:
             try:
                 return _FSEventsBackend(watcher)
             except Exception:  # pragma: no cover - optional
                 return None
-        return None
+        return _PollingBackend(watcher)
+
+
+class _PollingBackend(_WatcherBackend):
+    """Simple polling backend used when FSEvents is unavailable."""
+
+    def __init__(self, watcher: "RealtimeWatcher") -> None:
+        self._watcher = watcher
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._snapshot: dict[Path, tuple[float, int]] = {}
+
+    def start(self) -> None:
+        self._snapshot = self._build_snapshot()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="WatcherPolling", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join()
+        self._thread = None
+
+    def _run(self) -> None:
+        interval = max(self._watcher.polling_interval, 0.5)
+        while not self._stop_event.wait(interval):
+            self._scan()
+
+    def _scan(self) -> None:
+        current = self._build_snapshot()
+        previous = self._snapshot
+
+        previous_paths = set(previous)
+        current_paths = set(current)
+
+        for path in current_paths - previous_paths:
+            self._watcher.publish(
+                FileSystemEvent(path=path, event_type=EventType.CREATED, is_directory=path.is_dir())
+            )
+
+        for path in previous_paths - current_paths:
+            self._watcher.publish(
+                FileSystemEvent(path=path, event_type=EventType.DELETED, is_directory=False)
+            )
+
+        for path in previous_paths & current_paths:
+            old_mtime, old_size = previous[path]
+            new_mtime, new_size = current[path]
+            if old_mtime != new_mtime or old_size != new_size:
+                self._watcher.publish(
+                    FileSystemEvent(path=path, event_type=EventType.MODIFIED, is_directory=path.is_dir())
+                )
+
+        self._snapshot = current
+
+    def _build_snapshot(self) -> dict[Path, tuple[float, int]]:
+        snapshot: dict[Path, tuple[float, int]] = {}
+        for root in self._watcher.paths:
+            if not root.exists():
+                continue
+            if root.is_file():
+                try:
+                    stat = root.stat()
+                except OSError:
+                    continue
+                snapshot[root] = (stat.st_mtime, stat.st_size)
+                continue
+            for path in self._iter_files(root):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                snapshot[path] = (stat.st_mtime, stat.st_size)
+        return snapshot
+
+    @staticmethod
+    def _iter_files(root: Path) -> list[Path]:
+        paths: list[Path] = []
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            return paths
+
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False):
+                paths.extend(_PollingBackend._iter_files(path))
+            else:
+                paths.append(path)
+        return paths
 
 
 _Sentinel = object()
