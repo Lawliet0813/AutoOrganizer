@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-organizer"
+version = "0.1.0"
+description = "AutoOrganizer smart file management system"
+authors = [{name = "AutoOrganizer Team"}]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["auto_organizer/tests"]
+addopts = "-q"
