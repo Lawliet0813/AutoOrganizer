@@ -65,8 +65,8 @@ python main.py --dry-run ~/Downloads
 ## 🧠 開發者指南
 
 ### 📘 起點
-請先閱讀：  
-📄 `AutoOrganizer_系統規格書_v2.1.md`  
+請先閱讀：
+📄 `AutoOrganizer 系統規格書（v2.0）`
 此為專案唯一技術來源（SSOT）。
 
 接著執行：  
