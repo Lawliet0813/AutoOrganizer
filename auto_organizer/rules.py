@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
+
+from .utils.fs import ensure_directory, unique_path
 
 
 CURRENT_RULES_VERSION = "2.0"
@@ -29,6 +34,26 @@ class RulesValidationError(Exception):
         if self.path:
             pointer = " at $" + ".".join(str(part) for part in self.path)
         return f"{self.message}{pointer}{location}"
+
+
+@dataclass(slots=True)
+class PlannedMove:
+    """Representation of a single file move operation."""
+
+    src: Path
+    dst: Path
+    category: str
+    reason: str
+
+
+@dataclass(slots=True)
+class MovePlan:
+    """Aggregate information describing a planned classification run."""
+
+    items: list[PlannedMove]
+    scanned: int
+    movable: int
+    created_dirs: set[Path]
 
 
 def load_rules(path: str | Path) -> Mapping[str, Any]:
@@ -70,7 +95,243 @@ def upgrade_rules(
     return upgraded
 
 
+def preview(
+    config: Path,
+    sources: list[Path],
+    target: Path,
+    limit: Optional[int],
+    output: Optional[Path],
+) -> int:
+    """Simulate file moves based on classification *config*."""
+
+    logger = logging.getLogger("auto_organizer")
+    plan = _build_plan(config, sources, target, limit, logger)
+    _emit_preview(plan, output, logger)
+    return 0
+
+
+def apply(
+    config: Path,
+    sources: list[Path],
+    target: Path,
+    limit: Optional[int],
+    output: Optional[Path],
+    rollback: Optional[Path],
+    dry_run: bool,
+) -> int:
+    """Apply classification rules, optionally moving files."""
+
+    logger = logging.getLogger("auto_organizer")
+    plan = _build_plan(config, sources, target, limit, logger)
+    if dry_run:
+        logger.info("Running in dry-run mode; no files will be moved")
+        _emit_preview(plan, output, logger)
+        return 0
+
+    if not plan.items:
+        logger.info("No files to move.")
+        _emit_preview(plan, output, logger)
+        return 0
+
+    rollback_path = rollback or target / "rollback.json"
+    ensure_directory(rollback_path.parent)
+    ensure_directory(target)
+
+    moved: list[PlannedMove] = []
+    errors: list[str] = []
+    for item in plan.items:
+        try:
+            ensure_directory(item.dst.parent)
+            shutil.move(str(item.src), str(item.dst))
+            moved.append(item)
+            logger.info("Moved %s -> %s", item.src, item.dst)
+        except Exception as exc:  # pragma: no cover - safety net
+            logger.error("Failed to move %s: %s", item.src, exc)
+            errors.append(str(item.src))
+
+    _emit_preview(plan, output, logger)
+
+    if moved:
+        _write_rollback(rollback_path, moved)
+        logger.info("Rollback information written to %s", rollback_path)
+
+    if errors:
+        logger.error("Encountered %d errors during apply", len(errors))
+        return 1
+    return 0
+
+
 # -- helpers ------------------------------------------------------------
+
+def _build_plan(
+    config: Path,
+    sources: Iterable[Path],
+    target: Path,
+    limit: Optional[int],
+    logger: logging.Logger,
+) -> MovePlan:
+    ruleset = _load_classification_rules(config)
+    planned: list[PlannedMove] = []
+    created_dirs: set[Path] = set()
+    reserved: set[Path] = set()
+
+    scanned = 0
+    for file_path in _iter_source_files(sources):
+        if limit is not None and scanned >= limit:
+            break
+        scanned += 1
+
+        category, reason = _classify(file_path, ruleset)
+        destination_dir = target / category
+        created_dirs.add(destination_dir)
+        candidate = unique_path(destination_dir / file_path.name, reserved=reserved)
+        planned.append(PlannedMove(src=file_path, dst=candidate, category=category, reason=reason))
+
+    logger.info(
+        "Planned %d move(s) out of %d scanned file(s) using config %s",
+        len(planned),
+        scanned,
+        config,
+    )
+
+    return MovePlan(items=planned, scanned=scanned, movable=len(planned), created_dirs=created_dirs)
+
+
+def _emit_preview(plan: MovePlan, output: Optional[Path], logger: logging.Logger) -> None:
+    if plan.items:
+        header = f"{'Source':<50} {'Category':<15} Destination"
+        print(header)
+        print("-" * len(header))
+        for item in plan.items:
+            print(f"{str(item.src):<50} {item.category:<15} {item.dst}")
+    else:
+        print("No files to process.")
+
+    dirs = sorted({str(path) for path in plan.created_dirs})
+    print()
+    print(f"Scanned files: {plan.scanned}")
+    print(f"Movable files: {plan.movable}")
+    if dirs:
+        print("Directories to create:")
+        for directory in dirs:
+            print(f"  - {directory}")
+
+    if output:
+        ensure_directory(output.parent)
+        if output.suffix.lower() == ".json":
+            payload = {
+                "items": [
+                    {
+                        "src": str(item.src),
+                        "category": item.category,
+                        "dst": str(item.dst),
+                        "reason": item.reason,
+                    }
+                    for item in plan.items
+                ],
+                "stats": {"scanned": plan.scanned, "movable": plan.movable},
+                "created_dirs": dirs,
+            }
+            output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            logger.info("Preview written to %s", output)
+        elif output.suffix.lower() == ".md":
+            lines = [
+                "# Rules Preview",
+                "",
+                "| Source | Category | Destination | Reason |",
+                "| --- | --- | --- | --- |",
+            ]
+            for item in plan.items:
+                lines.append(
+                    f"| {item.src} | {item.category} | {item.dst} | {item.reason} |"
+                )
+            lines.extend(
+                [
+                    "",
+                    "## Summary",
+                    f"- Scanned files: {plan.scanned}",
+                    f"- Movable files: {plan.movable}",
+                ]
+            )
+            if dirs:
+                lines.append("- Directories to create:")
+                lines.extend(f"  - {directory}" for directory in dirs)
+            output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            logger.info("Preview written to %s", output)
+        else:
+            raise ValueError(f"Unsupported output format: {output.suffix}")
+
+
+def _write_rollback(path: Path, moved: Iterable[PlannedMove]) -> None:
+    payload = {
+        "version": "1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "items": [
+            {
+                "src": str(item.src),
+                "dst": str(item.dst),
+            }
+            for item in moved
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _load_classification_rules(path: Path) -> Mapping[str, Any]:
+    data = load_rules(path)
+    rules = data.get("classificationRules")
+    if not isinstance(rules, Mapping):
+        raise RulesValidationError("Missing 'classificationRules' section", path=("classificationRules",))
+    categories = rules.get("categories")
+    if not isinstance(categories, list):
+        raise RulesValidationError("'categories' must be a list", path=("classificationRules", "categories"))
+    default = rules.get("defaultCategory")
+    if not isinstance(default, Mapping) or "id" not in default:
+        raise RulesValidationError(
+            "Missing default category id",
+            path=("classificationRules", "defaultCategory"),
+        )
+    return {
+        "categories": categories,
+        "default": str(default["id"]),
+    }
+
+
+def _iter_source_files(sources: Iterable[Path]) -> Iterable[Path]:
+    for source in sources:
+        if not source.exists():
+            continue
+        if source.is_file():
+            yield source
+            continue
+        for entry in source.rglob("*"):
+            if entry.is_file():
+                yield entry
+
+
+def _classify(path: Path, ruleset: Mapping[str, Any]) -> tuple[str, str]:
+    extension = path.suffix.lower()
+    size = path.stat().st_size
+    for raw in ruleset["categories"]:
+        if not isinstance(raw, Mapping):
+            continue
+        category_id = str(raw.get("id", ""))
+        rule = raw.get("rules", {})
+        if not category_id:
+            continue
+        extensions = {ext.lower() for ext in rule.get("extensions", []) if isinstance(ext, str)}
+        min_size = rule.get("minSize")
+        if extensions and extension not in extensions:
+            continue
+        if min_size is not None and size < int(min_size):
+            continue
+        reason = f"matched extension {extension}" if extensions else "matched rule"
+        if min_size is not None:
+            reason += f" and size >= {int(min_size)}"
+        return category_id, reason
+    return str(ruleset["default"]), "no matching rule"
+
+
 def _apply_migrations(data: Mapping[str, Any]) -> Mapping[str, Any]:
     version = str(data.get("version", "1.0"))
     rules = dict(data)
@@ -197,7 +458,9 @@ def _locate_pointer(content: str, path: Sequence[str | int]) -> tuple[int | None
 __all__ = [
     "CURRENT_RULES_VERSION",
     "RulesValidationError",
+    "apply",
     "load_rules",
+    "preview",
     "upgrade_rules",
     "validate_rules",
 ]

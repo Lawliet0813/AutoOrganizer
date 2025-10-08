@@ -11,7 +11,10 @@ from .dedup_index import DedupIndex
 from .logger import configure_logging, next_log_path
 from .reporter import ReportGenerator, RunSummary
 from .rollback import RollbackManager
+from .rules import apply as apply_rules
+from .rules import preview as preview_rules
 from .rules import RulesValidationError, upgrade_rules, validate_rules
+from .reporting import render_report
 from .scheduler import build_schedule, launch_agent_payload, write_launch_agent
 
 
@@ -64,10 +67,31 @@ def _build_parser() -> argparse.ArgumentParser:
     rules_upgrade.add_argument("--output", type=Path)
     rules_upgrade.set_defaults(handler=_handle_rules_upgrade)
 
+    rules_preview = rules_sub.add_parser("preview", help="Preview how files would be organized")
+    rules_preview.add_argument("--config", type=Path, required=True)
+    rules_preview.add_argument("--source", type=Path, action="append", required=True)
+    rules_preview.add_argument("--target", type=Path, required=True)
+    rules_preview.add_argument("--limit", type=int)
+    rules_preview.add_argument("--output", type=Path)
+    rules_preview.set_defaults(handler=_handle_rules_preview)
+
+    rules_apply = rules_sub.add_parser("apply", help="Apply rules to organize files")
+    rules_apply.add_argument("--config", type=Path, required=True)
+    rules_apply.add_argument("--source", type=Path, action="append", required=True)
+    rules_apply.add_argument("--target", type=Path, required=True)
+    rules_apply.add_argument("--limit", type=int)
+    rules_apply.add_argument("--output", type=Path)
+    rules_apply.add_argument(
+        "--rollback", type=Path, help="Path to write rollback information (default target/rollback.json)"
+    )
+    rules_apply.add_argument("--dry-run", action="store_true", help="Run without moving files")
+    rules_apply.set_defaults(handler=_handle_rules_apply)
+
     # report command
     report_parser = subparsers.add_parser("report", help="Generate consolidated reports")
     report_parser.add_argument("summary", type=Path, help="Path to run summary JSON")
-    report_parser.add_argument("--output", type=Path, default=Path("reports"))
+    report_parser.add_argument("--format", choices=["text", "markdown", "json"], default="text")
+    report_parser.add_argument("--output", type=Path)
     report_parser.set_defaults(handler=_handle_report)
 
     # schedule command
@@ -144,8 +168,59 @@ def _handle_rules_upgrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_rules_preview(args: argparse.Namespace) -> int:
+    logger = configure_logging()
+    sources = args.source
+    try:
+        return preview_rules(
+            config=args.config,
+            sources=sources,
+            target=args.target,
+            limit=args.limit,
+            output=args.output,
+        )
+    except RulesValidationError as exc:
+        logger.error("Preview failed: %s", exc)
+        print(f"Preview failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Unexpected preview error: %s", exc)
+        print(f"Preview failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _handle_rules_apply(args: argparse.Namespace) -> int:
+    logger = configure_logging()
+    sources = args.source
+    try:
+        return apply_rules(
+            config=args.config,
+            sources=sources,
+            target=args.target,
+            limit=args.limit,
+            output=args.output,
+            rollback=args.rollback,
+            dry_run=args.dry_run,
+        )
+    except RulesValidationError as exc:
+        logger.error("Apply failed: %s", exc)
+        print(f"Apply failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Unexpected apply error: %s", exc)
+        print(f"Apply failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def _handle_report(args: argparse.Namespace) -> int:
-    raw = json.loads(args.summary.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(args.summary.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"Summary file not found: {args.summary}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"Invalid summary JSON: {exc}", file=sys.stderr)
+        return 1
     summary = RunSummary(
         started_at=datetime.fromisoformat(raw["started_at"]),
         finished_at=datetime.fromisoformat(raw["finished_at"]),
@@ -157,8 +232,13 @@ def _handle_report(args: argparse.Namespace) -> int:
     )
     generator = ReportGenerator()
     payload = generator.build_payload(summary)
-    json_path, txt_path = generator.write(payload, args.output)
-    print(f"Report generated: {json_path} / {txt_path}")
+    rendered = render_report(payload, args.format)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+        print(f"Report written to {args.output}")
+    else:
+        print(rendered)
     return 0
 
 
