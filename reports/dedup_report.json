@@ -1,0 +1,27 @@
+{
+  "generated_at": "2025-10-08T16:57:42.693087Z",
+  "groups": [
+    {
+      "hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+      "count": 2,
+      "size_each": 4,
+      "wasted_bytes": 4,
+      "files": [
+        {
+          "hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+          "path": "/tmp/pytest-of-jules/pytest-4/test_cli_dedup_and_report0/dup1.txt",
+          "size": 4,
+          "modified_at": "2025-10-08T16:57:42.663401"
+        },
+        {
+          "hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+          "path": "/tmp/pytest-of-jules/pytest-4/test_cli_dedup_and_report0/dup2.txt",
+          "size": 4,
+          "modified_at": "2025-10-08T16:57:42.667402"
+        }
+      ]
+    }
+  ],
+  "total_groups": 1,
+  "total_wasted_bytes": 4
+}

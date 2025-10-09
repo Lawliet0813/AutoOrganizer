@@ -1,0 +1,8 @@
+AutoOrganizer Deduplication Report
+================================
+Groups: 1
+Potential space recovery: 4 bytes
+
+Hash: 0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5 (2 files)
+  - /tmp/pytest-of-jules/pytest-4/test_cli_dedup_and_report0/dup1.txt [4 bytes]
+  - /tmp/pytest-of-jules/pytest-4/test_cli_dedup_and_report0/dup2.txt [4 bytes]
